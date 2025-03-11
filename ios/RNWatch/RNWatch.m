@@ -26,15 +26,12 @@
 #endif
 
 static NSString *EVENT_FILE_TRANSFER = @"WatchFileTransfer";
-static NSString *EVENT_WATCH_FILE_RECEIVED = @"WatchFileReceived";
-static NSString *EVENT_WATCH_FILE_ERROR = @"WatchFileError";
 static NSString *EVENT_RECEIVE_MESSAGE = @"WatchReceiveMessage";
 static NSString *EVENT_RECEIVE_MESSAGE_DATA = @"WatchReceiveMessageData";
 static NSString *EVENT_ACTIVATION_ERROR = @"WatchActivationError";
 static NSString *EVENT_WATCH_REACHABILITY_CHANGED = @"WatchReachabilityChanged";
 static NSString *EVENT_WATCH_USER_INFO_RECEIVED = @"WatchUserInfoReceived";
 static NSString *EVENT_APPLICATION_CONTEXT_RECEIVED = @"WatchApplicationContextReceived";
-static NSString *EVENT_APPLICATION_CONTEXT_RECEIVED_ERROR = @"WatchApplicationContextReceivedError";
 static NSString *EVENT_SESSION_DID_DEACTIVATE = @"WatchSessionDidDeactivate";
 static NSString *EVENT_SESSION_BECAME_INACTIVE = @"WatchSessionBecameInactive";
 static NSString *EVENT_PAIR_STATUS_CHANGED = @"WatchPairStatusChanged";
@@ -42,17 +39,17 @@ static NSString *EVENT_INSTALL_STATUS_CHANGED = @"WatchInstallStatusChanged";
 static NSString *EVENT_WATCH_USER_INFO_ERROR = @"WatchUserInfoError";
 static NSString *EVENT_WATCH_APPLICATION_CONTEXT_ERROR = @"WatchApplicationContextError";
 
-static RNWatch *sharedInstance;
+static RNWatch *sharedInstance = nil;
 
 @implementation RNWatch {
-  BOOL hasObservers;
-  NSMutableArray<NSDictionary *> *pendingEvents;
+    BOOL hasObservers;
+    NSMutableArray<NSDictionary *> *pendingEvents;
 }
 
 RCT_EXPORT_MODULE()
 
 ////////////////////////////////////////////////////////////////////////////////
-// Init
+// Singleton Pattern
 ////////////////////////////////////////////////////////////////////////////////
 
 + (BOOL)requiresMainQueueSetup {
@@ -60,43 +57,66 @@ RCT_EXPORT_MODULE()
 }
 
 + (RNWatch *)sharedInstance {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sharedInstance = [[super allocWithZone:NULL] initPrivate]; // Ensure only one instance
+    });
     return sharedInstance;
 }
 
+// Prevent direct allocation from outside
++ (instancetype)allocWithZone:(struct _NSZone *)zone {
+    return [self sharedInstance];
+}
+
+// Standard init should return the singleton instance
 - (instancetype)init {
-    sharedInstance = [super init];
-    self.replyHandlers = [NSCache new];
-    self.fileTransfers = [NSMutableDictionary new];
-    self.queuedFiles = [NSMutableDictionary new];
-    self.queuedUserInfo = [NSMutableDictionary new];
- 
-    hasObservers = NO;
-    pendingEvents = [NSMutableArray array];
+    return [RNWatch sharedInstance];
+}
 
-    if ([WCSession isSupported]) {
-        WCSession *session = [WCSession defaultSession];
-        session.delegate = self;
-        self.session = session;
-        [self.session activateSession];
-        [self.session addObserver:self forKeyPath:@"paired" options:NSKeyValueObservingOptionNew context:nil];
-        [self.session addObserver:self forKeyPath:@"watchAppInstalled" options:NSKeyValueObservingOptionNew context:nil];
+// Private init method to enforce singleton behavior
+- (instancetype)initPrivate {
+    self = [super init];
+    if (self) {
+        self.replyHandlers = [NSCache new];
+        self.fileTransfers = [NSMutableDictionary new];
+        self.queuedUserInfo = [NSMutableDictionary new];
+
+        hasObservers = NO;
+        pendingEvents = [NSMutableArray array];
+
+        if ([WCSession isSupported]) {
+            self.session = [WCSession defaultSession];
+            self.session.delegate = self;
+            [self.session activateSession];
+
+            [self.session addObserver:self forKeyPath:@"paired" options:NSKeyValueObservingOptionNew context:nil];
+            [self.session addObserver:self forKeyPath:@"watchAppInstalled" options:NSKeyValueObservingOptionNew context:nil];
+        }
     }
+    return self;
+}
 
-    return sharedInstance;
+////////////////////////////////////////////////////////////////////////////////
+// Dealloc - Remove Observers
+////////////////////////////////////////////////////////////////////////////////
+
+- (void)dealloc {
+    if ([WCSession isSupported]) {
+        [self.session removeObserver:self forKeyPath:@"paired" context:nil];
+        [self.session removeObserver:self forKeyPath:@"watchAppInstalled" context:nil];
+    }
 }
 
 - (NSArray<NSString *> *)supportedEvents {
     return @[
             EVENT_FILE_TRANSFER,
-            EVENT_WATCH_FILE_RECEIVED,
-            EVENT_WATCH_FILE_ERROR,
             EVENT_RECEIVE_MESSAGE,
             EVENT_RECEIVE_MESSAGE_DATA,
             EVENT_ACTIVATION_ERROR,
             EVENT_WATCH_REACHABILITY_CHANGED,
             EVENT_WATCH_USER_INFO_RECEIVED,
             EVENT_APPLICATION_CONTEXT_RECEIVED,
-            EVENT_APPLICATION_CONTEXT_RECEIVED_ERROR,
             EVENT_PAIR_STATUS_CHANGED,
             EVENT_INSTALL_STATUS_CHANGED,
             EVENT_SESSION_BECAME_INACTIVE,
@@ -113,18 +133,12 @@ RCT_EXPORT_MODULE()
       [self sendEventWithName:[event objectForKey:@"name"] body:[event objectForKey:@"body"]];
   }
 }
-
+ 
 -(void)stopObserving {
   hasObservers = NO;
 }
 
 
-- (void) dealloc{
-    if ([WCSession isSupported]) {
-        [self.session removeObserver:self forKeyPath:@"paired" context:nil];
-        [self.session removeObserver:self forKeyPath:@"watchAppInstalled" context:nil];
-    }
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -132,7 +146,7 @@ RCT_EXPORT_MODULE()
 activationDidCompleteWithState:(WCSessionActivationState)activationState
                          error:(NSError *)error {
     if (error) {
-        [self dispatchEventWithName:EVENT_ACTIVATION_ERROR body:@{@"error": dictionaryFromError(error)}];
+        [self dispatchEventWithName:EVENT_ACTIVATION_ERROR body:@{@"error": error}];
     }
 }
 
@@ -355,35 +369,6 @@ RCT_EXPORT_METHOD(getFileTransfers:
     resolve(payload);
 }
 
-RCT_EXPORT_METHOD(getQueuedFiles:
-    (RCTPromiseResolveBlock) resolve
-            reject:
-            (RCTPromiseRejectBlock) reject) {
-    resolve(self.queuedFiles);
-    // Clear the cache.
-    [self.queuedFiles removeAllObjects];
-}
-
-RCT_EXPORT_METHOD(clearFilesQueue:
-    (RCTPromiseResolveBlock) resolve
-            reject:
-            (RCTPromiseRejectBlock) reject) {
-    self.queuedFiles = [NSMutableDictionary new];
-    resolve([NSNull null]);
-}
-
-RCT_EXPORT_METHOD(dequeueFile:
-    (NSArray<NSString *> *) ids
-) {
-    for (NSString *id in ids) {
-        [self.queuedFiles removeObjectForKey:id];
-    }
-
-    if (!ids || !ids.count){
-        [self dispatchEventWithName:EVENT_WATCH_FILE_RECEIVED body:self.queuedFiles];
-    }
-}
-
 - (FileTransferEvent *)getFileTransferEvent:(WCSessionFileTransfer *)transfer {
     NSString *uuid = transfer.file.metadata[@"id"];
 
@@ -423,38 +408,9 @@ RCT_EXPORT_METHOD(dequeueFile:
     }
 }
 
-- (void)session:(WCSession *)session didReceiveFile:(WCSessionFile *)file {
-  NSFileManager *fileManager = NSFileManager.defaultManager;
-  NSURL *directoryURL = [[fileManager URLsForDirectory:NSDocumentDirectory
-                                             inDomains:NSUserDomainMask][0] URLByAppendingPathComponent:@"FilesReceived"];
-  if (![fileManager fileExistsAtPath:directoryURL.path]) {
-    [fileManager createDirectoryAtURL:directoryURL withIntermediateDirectories:YES attributes:nil error:nil];
-  }
-  
-  NSURL *destinationURL = [directoryURL URLByAppendingPathComponent:file.fileURL.lastPathComponent];
-  NSError *error;
-  [fileManager copyItemAtPath:file.fileURL.path
-                       toPath:destinationURL.path
-                        error:&error];
-  
-  NSNumber *timestamp = @(jsTimestamp());
-  NSString *id = [timestamp stringValue];
-  
-  NSDictionary *fileInfo = @{
-    @"id": id,
-    @"timestamp": timestamp,
-    @"url": destinationURL.absoluteString,
-    @"metadata": file.metadata != nil ? file.metadata : [NSNull null]
-  };
-  
-  if (error) {
-    NSLog(@"Copying received file error: %@ %@", error, error.userInfo);
-    [self dispatchEventWithName:EVENT_WATCH_FILE_ERROR body:@{@"fileInfo": fileInfo,  @"error": error, @"errorUserInfo": error.userInfo}];
-    return;
-  }
-  
-  [self.queuedFiles setValue:fileInfo forKey:id];
-  [self dispatchEventWithName:EVENT_WATCH_FILE_RECEIVED body:fileInfo];
+- (void)session:(WCSession *)session
+ didReceiveFile:(WCSessionFile *)file {
+    // TODO
 }
 
 - (void)      session:(WCSession *)session
@@ -500,7 +456,7 @@ RCT_EXPORT_METHOD(updateApplicationContext:
     [self.session updateApplicationContext:context error:&error];
     if (error) {
         NSLog(@"Application context update error: %@ %@", error, [error userInfo]);
-        [self dispatchEventWithName:EVENT_WATCH_APPLICATION_CONTEXT_ERROR body:@{@"context": context, @"error": dictionaryFromError(error)}];
+        [self dispatchEventWithName:EVENT_WATCH_APPLICATION_CONTEXT_ERROR body:@{@"context": context, @"error": [error userInfo]}];
     }
 }
 
@@ -522,16 +478,8 @@ RCT_EXPORT_METHOD(getApplicationContext:
 
 - (void)             session:(WCSession *)session
 didReceiveApplicationContext:(NSDictionary<NSString *, id> *)applicationContext {
-    NSError *error = nil;
-    [self.session updateApplicationContext:applicationContext error:&error];
-
-    if (error) {
-        NSLog(@"Application context recieve error: %@", error);
-        [self dispatchEventWithName:EVENT_APPLICATION_CONTEXT_RECEIVED_ERROR body:@{@"error": dictionaryFromError(error)}];
-    } else {
-        [self dispatchEventWithName:EVENT_APPLICATION_CONTEXT_RECEIVED body:applicationContext];
-    }
-    
+    [self.session updateApplicationContext:applicationContext error:nil];
+    [self dispatchEventWithName:EVENT_APPLICATION_CONTEXT_RECEIVED body:applicationContext];
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -575,7 +523,7 @@ RCT_EXPORT_METHOD(dequeueUserInfo:
 - (void)session:(WCSession *)session didFinishUserInfoTransfer:(WCSessionUserInfoTransfer *)userInfoTransfer error:(NSError *)error {
     if (error) {
         NSLog(@"User info transfer error: %@ %@", error, [error userInfo]);
-      [self dispatchEventWithName:EVENT_WATCH_USER_INFO_ERROR body:@{@"userInfo": [userInfoTransfer userInfo], @"error": dictionaryFromError(error)}];
+        [self dispatchEventWithName:EVENT_WATCH_USER_INFO_ERROR body:@{@"userInfo": [userInfoTransfer userInfo], @"error": [error userInfo]}];
     }
 }
 
